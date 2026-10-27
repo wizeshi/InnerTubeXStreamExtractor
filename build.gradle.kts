@@ -1,6 +1,6 @@
 plugins {
-    kotlin("jvm") version "2.0.21"
-    kotlin("plugin.serialization") version "2.0.21"
+    kotlin("jvm") version "2.4.21"
+    kotlin("plugin.serialization") version "2.4.21"
     id("com.github.johnrengelman.shadow") version "8.1.1"
 }
 
@@ -9,19 +9,28 @@ version = "1.0.0"
 
 repositories {
     mavenCentral()
-    maven("https://jitpack.io")
+    maven("https://jitpack.io") {
+        content {
+            includeGroup("com.github.MetrolistGroup.innertubex")
+            includeGroup("com.github.MetrolistGroup.quackjs")
+            includeGroup("com.github.MetrolistGroup")
+        }
+    }
 }
 
 dependencies {
-    implementation("io.ktor:ktor-server-core-jvm:2.3.12")
-    implementation("io.ktor:ktor-server-cio-jvm:2.3.12")
-    implementation("io.ktor:ktor-server-content-negotiation-jvm:2.3.12")
-    implementation("io.ktor:ktor-serialization-kotlinx-json-jvm:2.3.12")
-    implementation("io.ktor:ktor-server-cors-jvm:2.3.12")
-    implementation("io.ktor:ktor-client-core-jvm:2.3.12")
-    implementation("io.ktor:ktor-client-cio-jvm:2.3.12")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.1")
+    implementation("com.github.MetrolistGroup.innertubex:innertubex:v0.11.2")
+    implementation("io.ktor:ktor-server-core-jvm:3.6.0")
+    implementation("io.ktor:ktor-server-cio-jvm:3.6.0")
+    implementation("io.ktor:ktor-server-content-negotiation-jvm:3.6.0")
+    implementation("io.ktor:ktor-serialization-kotlinx-json-jvm:3.6.0")
+    implementation("io.ktor:ktor-server-cors-jvm:3.6.0")
+    implementation("io.ktor:ktor-client-core-jvm:3.6.0")
+    implementation("io.ktor:ktor-client-cio-jvm:3.6.0")
+    implementation("io.ktor:ktor-client-okhttp-jvm:3.6.0")
+    implementation("io.ktor:ktor-client-content-negotiation-jvm:3.6.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
     implementation("ch.qos.logback:logback-classic:1.5.6")
 }
 

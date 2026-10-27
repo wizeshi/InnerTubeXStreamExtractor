@@ -112,7 +112,11 @@ class InnerTubeXServer(
                         return@get
                     }
                     val result = service.resolveStream(videoId, actualPort)
-                    call.respond(result)
+                    if (result == null || result.url.isBlank()) {
+                        call.respond(HttpStatusCode.NotFound, mapOf("error" to "Stream unavailable for $videoId"))
+                    } else {
+                        call.respond(result)
+                    }
                 }
 
                 get("/stream/sabr/{videoId}") {
@@ -121,32 +125,13 @@ class InnerTubeXServer(
                         call.respond(HttpStatusCode.BadRequest, "Missing videoId")
                         return@get
                     }
-
-                    // Handles RFC 7233 range requests for media_kit
-                    call.response.headers.append(HttpHeaders.AcceptRanges, "bytes")
-                    call.response.headers.append(HttpHeaders.ContentType, "audio/webm")
-
-                    val dummyChunk = ByteArray(64 * 1024) { 0 }
-                    val range = call.request.headers[HttpHeaders.Range]
-                    if (range != null && range.startsWith("bytes=")) {
-                        call.respondBytes(
-                            dummyChunk,
-                            contentType = ContentType.Audio.OGG,
-                            status = HttpStatusCode.PartialContent
-                        )
-                    } else {
-                        call.respondBytes(
-                            dummyChunk,
-                            contentType = ContentType.Audio.OGG,
-                            status = HttpStatusCode.OK
-                        )
-                    }
+                    call.respond(HttpStatusCode.NotFound, "SABR stream proxy not available")
                 }
             }
         }.start(wait = false)
 
         actualPort = kotlinx.coroutines.runBlocking {
-            server.resolvedConnectors().first().port
+            server.engine.resolvedConnectors().first().port
         }
         return actualPort
     }

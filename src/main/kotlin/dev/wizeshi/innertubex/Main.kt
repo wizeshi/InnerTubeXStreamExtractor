@@ -6,6 +6,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 fun main(args: Array<String>) {
+    System.setProperty("java.net.preferIPv6Addresses", "true")
     val port = if (args.isNotEmpty()) args[0].toIntOrNull() ?: 0 else 0
     val server = InnerTubeXServer()
     val boundPort = server.start(port)

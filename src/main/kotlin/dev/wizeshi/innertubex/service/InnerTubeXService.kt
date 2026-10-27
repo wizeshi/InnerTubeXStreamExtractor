@@ -1,21 +1,56 @@
 package dev.wizeshi.innertubex.service
 
+import com.metrolist.innertubex.InnerTube
+import com.metrolist.innertubex.cipher.PlayerConfigRepository
+import com.metrolist.innertubex.cipher.RemotePlayerConfigStore
+import com.metrolist.innertubex.cipher.YouTubeCipherService
+import com.metrolist.innertubex.extraction.AudioQuality
+import com.metrolist.innertubex.extraction.ContentHints
+import com.metrolist.innertubex.extraction.InnerTubeExtractor
+import com.metrolist.innertubex.extraction.YtConfigParserImpl
+import com.metrolist.innertubex.models.YouTubeClient
+import com.metrolist.innertubex.models.response.PlayerResponse
 import dev.wizeshi.innertubex.models.*
 import io.ktor.client.*
+import io.ktor.client.call.*
 import io.ktor.client.engine.cio.*
+import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
+import io.ktor.serialization.kotlinx.json.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import java.util.concurrent.ConcurrentHashMap
 
 class InnerTubeXService {
-    private val client = HttpClient(CIO) {
-        engine {
-            requestTimeout = 30000
+    private val httpClient = HttpClient(CIO) {
+        install(ContentNegotiation) {
+            json(Json {
+                ignoreUnknownKeys = true
+                isLenient = true
+            })
         }
+    }
+
+    private val innerTube = InnerTube(httpClient)
+    private val configStore = RemotePlayerConfigStore(httpClient, PlayerConfigRepository.disabled())
+    private val cipherService = YouTubeCipherService(httpClient, configStore)
+    private val extractor = InnerTubeExtractor(
+        configParser = YtConfigParserImpl(
+            httpClient = httpClient,
+            innerTube = innerTube,
+            remotePlayerConfigStore = configStore,
+            cipherService = cipherService
+        ),
+        cipherService = cipherService,
+        innerTube = innerTube,
+    )
+
+    private val jsonParser = Json {
+        ignoreUnknownKeys = true
+        isLenient = true
     }
 
     private val sessionCookies = ConcurrentHashMap<String, String>()
@@ -25,7 +60,10 @@ class InnerTubeXService {
         sessionCookies.clear()
         sessionCookies.putAll(cookies)
 
-        val hasAuthCookies = cookies.containsKey("SAPISID") || cookies.containsKey("LOGIN_INFO")
+        val cookieStr = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+        innerTube.cookie = cookieStr
+
+        val hasAuthCookies = innerTube.hasSapCookieAuth() || cookies.containsKey("SAPISID") || cookies.containsKey("LOGIN_INFO")
         authenticatedUser = if (hasAuthCookies) {
             AuthStatusResponse(
                 authenticated = true,
@@ -42,25 +80,111 @@ class InnerTubeXService {
 
     fun clearSession(): AuthStatusResponse {
         sessionCookies.clear()
+        innerTube.cookie = null
+        innerTube.visitorData = null
         authenticatedUser = AuthStatusResponse(authenticated = false)
         return authenticatedUser
     }
 
-    private fun cookieHeader(): String {
-        return sessionCookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+    suspend fun resolveStream(videoId: String, basePort: Int): ResolveResponse? = withContext(Dispatchers.IO) {
+        try {
+            val stream = extractor.extract(
+                videoId = videoId,
+                hints = ContentHints(wantVideo = false),
+                audioQuality = AudioQuality.HIGH,
+            )
+
+            if (stream != null && stream.audioUrl.isNotBlank()) {
+                val isOpus = stream.mimeType?.contains("webm") == true || stream.mimeType?.contains("opus") == true
+                val bitrate = (stream.bitrate ?: 160000) / 1000
+                return@withContext ResolveResponse(
+                    videoId = videoId,
+                    url = stream.audioUrl,
+                    format = if (isOpus) "opus" else "m4a",
+                    bitrate = bitrate,
+                    isSabr = stream.sabrBootstrap != null,
+                )
+            }
+        } catch (e: Exception) {
+            System.err.println("InnerTubeExtractor failed for $videoId: ${e.message}")
+            if (e is com.metrolist.innertubex.extraction.StreamResolveException) {
+                System.err.println("Diagnostics reason: ${e.reason}")
+                e.diagnostics?.attempts?.forEach { attempt ->
+                    System.err.println("Attempt client: ${attempt.clientName}, profile: ${attempt.profileId}, outcome: ${attempt.outcome}")
+                }
+            }
+            e.printStackTrace()
+        }
+        null
     }
 
-    suspend fun search(query: String, type: String?, limit: Int): SearchResponse = withContext(Dispatchers.IO) {
+    suspend fun getTrackDetails(videoId: String): TrackDetails = withContext(Dispatchers.IO) {
+        try {
+            val res = innerTube.player(YouTubeClient.WEB, videoId)
+            val player = res.body<PlayerResponse>()
+            val details = player.videoDetails
+            val streamingData = player.streamingData
+
+            val title = details?.title ?: "Unknown Title"
+            val author = details?.author ?: "Unknown Artist"
+            val authorId = details?.channelId
+            val lengthSec = details?.lengthSeconds?.toLongOrNull() ?: 0L
+            val thumbUrl = details?.thumbnail?.thumbnails?.lastOrNull()?.url
+                ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+
+            val formats = mutableListOf<FormatInfo>()
+            streamingData?.adaptiveFormats?.forEach { format ->
+                if (format.mimeType.startsWith("audio/")) {
+                    formats.add(
+                        FormatInfo(
+                            itag = format.itag,
+                            mimeType = format.mimeType,
+                            bitrate = format.bitrate / 1000,
+                            url = format.url,
+                            contentLength = format.contentLength,
+                            sampleRate = format.audioSampleRate,
+                            isSabr = false,
+                        )
+                    )
+                }
+            }
+
+            TrackDetails(
+                videoId = videoId,
+                title = title,
+                author = author,
+                authorId = authorId,
+                durationSeconds = lengthSec,
+                thumbnailUrl = thumbUrl,
+                formats = formats,
+                hasLyrics = true,
+                isSabrAvailable = false
+            )
+        } catch (e: Exception) {
+            System.err.println("Failed to fetch track details for $videoId: ${e.message}")
+            TrackDetails(
+                videoId = videoId,
+                title = "Unknown",
+                author = "Unknown Artist",
+                durationSeconds = 0,
+                thumbnailUrl = "",
+                formats = emptyList(),
+                hasLyrics = false,
+                isSabrAvailable = false
+            )
+        }
+    }
+
+    suspend fun search(query: String, type: String?, limit: Int): dev.wizeshi.innertubex.models.SearchResponse = withContext(Dispatchers.IO) {
         try {
             val encodedQuery = query.encodeURLQueryComponent()
             val url = "https://suggestqueries-clients6.youtube.com/complete/search?client=youtube&ds=yt&q=$encodedQuery"
-            val response: HttpResponse = client.get(url) {
+            val response: HttpResponse = httpClient.get(url) {
                 headers {
                     append(HttpHeaders.UserAgent, "Mozilla/5.0")
                 }
             }
 
-            // Fallback placeholder search items if remote InnerTube endpoint is unreachable
             val items = mutableListOf<SearchResultItem>()
             items.add(
                 SearchResultItem(
@@ -74,42 +198,10 @@ class InnerTubeXService {
                 )
             )
 
-            SearchResponse(items = items.take(limit))
+            dev.wizeshi.innertubex.models.SearchResponse(items = items.take(limit))
         } catch (e: Exception) {
-            SearchResponse(items = emptyList())
+            dev.wizeshi.innertubex.models.SearchResponse(items = emptyList())
         }
-    }
-
-    suspend fun getTrackDetails(videoId: String): TrackDetails = withContext(Dispatchers.IO) {
-        val formats = listOf(
-            FormatInfo(
-                itag = 251,
-                mimeType = "audio/webm; codecs=\"opus\"",
-                bitrate = 160000,
-                sampleRate = 48000,
-                isSabr = true,
-                url = null
-            ),
-            FormatInfo(
-                itag = 140,
-                mimeType = "audio/mp4; codecs=\"mp4a.40.2\"",
-                bitrate = 128000,
-                sampleRate = 44100,
-                isSabr = false,
-                url = "https://rr1---sn-4g5edn6s.googlevideo.com/videoplayback?id=$videoId"
-            )
-        )
-
-        TrackDetails(
-            videoId = videoId,
-            title = "Track $videoId",
-            author = "Artist",
-            durationSeconds = 240,
-            thumbnailUrl = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg",
-            formats = formats,
-            hasLyrics = true,
-            isSabrAvailable = true
-        )
     }
 
     suspend fun getAlbumDetails(browseId: String): AlbumDetails = withContext(Dispatchers.IO) {
@@ -151,30 +243,7 @@ class InnerTubeXService {
         )
     }
 
-    suspend fun getLikedTracks(): SearchResponse = withContext(Dispatchers.IO) {
-        SearchResponse(items = emptyList())
-    }
-
-    suspend fun resolveStream(videoId: String, basePort: Int): ResolveResponse {
-        val details = getTrackDetails(videoId)
-        val sabrFormat = details.formats.firstOrNull { it.isSabr }
-        return if (sabrFormat != null) {
-            ResolveResponse(
-                videoId = videoId,
-                url = "http://127.0.0.1:$basePort/stream/sabr/$videoId",
-                format = "opus",
-                bitrate = sabrFormat.bitrate / 1000,
-                isSabr = true
-            )
-        } else {
-            val normal = details.formats.firstOrNull { it.url != null }
-            ResolveResponse(
-                videoId = videoId,
-                url = normal?.url ?: "http://127.0.0.1:$basePort/stream/sabr/$videoId",
-                format = "m4a",
-                bitrate = (normal?.bitrate ?: 128000) / 1000,
-                isSabr = false
-            )
-        }
+    suspend fun getLikedTracks(): dev.wizeshi.innertubex.models.SearchResponse = withContext(Dispatchers.IO) {
+        dev.wizeshi.innertubex.models.SearchResponse(items = emptyList())
     }
 }
